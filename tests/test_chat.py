@@ -1,4 +1,6 @@
+import pytest
 from fastapi.testclient import TestClient
+from google.genai import errors as genai_errors
 
 import app.main as main
 from app.models import ChatRequest, ChatTurn
@@ -61,3 +63,44 @@ def test_normalize_history_respects_max_turns():
 
 def test_chat_request_history_is_optional():
     assert ChatRequest(question='Hola').history == []
+
+
+class FakeModels:
+    """Simula Gemini: falla con el código indicado para ciertos modelos."""
+
+    def __init__(self, failures):
+        self.failures = failures
+        self.calls = []
+
+    def generate_content(self, model, contents, config):
+        self.calls.append(model)
+        if model in self.failures:
+            raise genai_errors.APIError(self.failures[model], {'error': {'message': 'fallo simulado'}})
+        return f'respuesta de {model}'
+
+
+def use_fake(monkeypatch, failures, models='principal', fallbacks='respaldo1,respaldo2'):
+    fake = FakeModels(failures)
+    monkeypatch.setattr(main.settings, 'gemini_model', models)
+    monkeypatch.setattr(main.settings, 'gemini_fallback_models', fallbacks)
+    monkeypatch.setattr(main, 'get_gemini_client', lambda: type('Client', (), {'models': fake})())
+    return fake
+
+
+def test_fallback_on_unavailable_and_quota(monkeypatch):
+    fake = use_fake(monkeypatch, {'principal': 503, 'respaldo1': 429})
+    assert main.generate_with_fallback([], None) == 'respuesta de respaldo2'
+    assert fake.calls == ['principal', 'respaldo1', 'respaldo2']
+
+
+def test_no_fallback_on_client_error(monkeypatch):
+    fake = use_fake(monkeypatch, {'principal': 400})
+    with pytest.raises(genai_errors.APIError):
+        main.generate_with_fallback([], None)
+    assert fake.calls == ['principal']
+
+
+def test_chat_models_without_duplicates(monkeypatch):
+    monkeypatch.setattr(main.settings, 'gemini_model', 'a')
+    monkeypatch.setattr(main.settings, 'gemini_fallback_models', 'b, a ,c,')
+    assert main.settings.chat_models == ['a', 'b', 'c']

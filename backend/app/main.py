@@ -4,6 +4,7 @@ import time
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from google.genai import errors as genai_errors
 from google.genai import types
 
 from app.config import get_settings
@@ -108,6 +109,21 @@ def normalize_history(history: list[ChatTurn], max_turns: int) -> list[ChatTurn]
     return turns
 
 
+def generate_with_fallback(contents: list[types.Content], config: types.GenerateContentConfig):
+    """Prueba los modelos en orden; salta al siguiente si uno está saturado (5xx) o sin cuota (429)."""
+    last_error: Exception | None = None
+    for model in settings.chat_models:
+        try:
+            return get_gemini_client().models.generate_content(model=model, contents=contents, config=config)
+        except genai_errors.APIError as exc:
+            if exc.code == 429 or (exc.code or 0) >= 500:
+                logger.warning('Modelo %s no disponible (%s); probando el siguiente', model, exc.code)
+                last_error = exc
+                continue
+            raise
+    raise last_error or RuntimeError('No hay modelos configurados')
+
+
 @app.post('/chat', response_model=ChatResponse)
 def chat(payload: ChatRequest) -> ChatResponse:
     history = normalize_history(payload.history, settings.chat_history_turns)
@@ -150,10 +166,9 @@ def chat(payload: ChatRequest) -> ChatResponse:
         parts=[types.Part(text=f'CONTEXTO:\n{context}\n\nMENSAJE DEL VISITANTE:\n{payload.question}')],
     ))
     try:
-        response = get_gemini_client().models.generate_content(
-            model=settings.gemini_model,
-            contents=contents,
-            config=types.GenerateContentConfig(
+        response = generate_with_fallback(
+            contents,
+            types.GenerateContentConfig(
                 system_instruction=SYSTEM_INSTRUCTION,
                 temperature=settings.chat_temperature,
             ),
