@@ -14,6 +14,11 @@ class Settings(BaseSettings):
     environment: str = 'development'
     allowed_origins: str = 'http://localhost:3000'
     chat_min_context_score: float = 0.35
+    # Mensajes previos de la conversación que se tienen en cuenta (los envía el widget).
+    chat_history_turns: int = 8
+    chat_temperature: float = 0.3
+    # Token para los endpoints de ingesta (/sources/*). Si está vacío, la ingesta queda desactivada.
+    admin_token: str = ''
 
     @property
     def origins(self) -> list[str]:
